@@ -110,7 +110,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         szClassName,
         
         // 👇 CHANGE THE TITLE THAT SHOWS ON SCREEN HERE 👇
-        "Your Company Name - KVM Video Display", 
+        "Next Core System Pvt Ltd", 
         
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, 800, 600,
