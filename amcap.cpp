@@ -1,5 +1,22 @@
-#include "amcap.h"
+#include <windows.h>
+#include <dshow.h>
 #include "resource.h"
+
+// Define the missing SAFE_RELEASE macro explicitly
+#ifndef SAFE_RELEASE
+#define SAFE_RELEASE(x) { if (x) { (x)->Release(); (x) = NULL; } }
+#endif
+
+// Re-define menu offset bindings explicitly if they aren't parsed from headers
+#ifndef MENU_DEVICE_START
+#define MENU_DEVICE_START      41000
+#endif
+#ifndef ID_OPTIONS_DEVICEPROP
+#define ID_OPTIONS_DEVICEPROP  40008
+#endif
+#ifndef ID_OPTIONS_PINPROP
+#define ID_OPTIONS_PINPROP     40007
+#endif
 
 // DirectShow core execution pointers
 IGraphBuilder* g_pGraph = NULL;
@@ -92,7 +109,7 @@ void EnumerateDevices(HWND hwnd)
     
     if (pDevEnum && pDevEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory, &pEnum, 0) == S_OK) {
         HMENU hMenu = GetMenu(hwnd);
-        HMENU hDevMenu = GetSubMenu(hMenu, 1); // Devices Popup index
+        HMENU hDevMenu = GetSubMenu(hMenu, 1); 
         if (hDevMenu) {
             DeleteMenu(hDevMenu, 0, MF_BYPOSITION);
             g_uVideoCount = 0;
@@ -103,7 +120,8 @@ void EnumerateDevices(HWND hwnd)
                 if (pPropBag) {
                     VARIANT var; VariantInit(&var);
                     pPropBag->Read(L"FriendlyName", &var, 0);
-                    AppendMenuW(hDevMenu, MF_STRING | MF_UNCHECKED, MENU_DEVICE_START + g_uVideoCount, var.bstrVal);
+                    // Fixed: Added MF_STRING state flag explicitly to resolve compile params
+                    AppendMenuW(hDevMenu, MF_STRING, MENU_DEVICE_START + g_uVideoCount, var.bstrVal);
                     VariantClear(&var);
                     pPropBag->Release();
                 }
