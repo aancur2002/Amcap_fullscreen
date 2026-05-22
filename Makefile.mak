@@ -3,7 +3,7 @@ rc = rc
 link = link
 
 CFLAGS = /nologo /O2 /DUNICODE /D_UNICODE /D_AMD64_ /EHsc
-LIBS = user32.lib gdi32.lib olestrmiids.lib ole32.lib oleaut32.lib mfplat.lib mf.lib mfreadwrite.lib mfuuid.lib
+LIBS = user32.lib gdi32.lib ole32.lib oleaut32.lib strmiids.lib uuid.lib vfw32.lib winmm.lib
 
 all: amcap.exe
 
