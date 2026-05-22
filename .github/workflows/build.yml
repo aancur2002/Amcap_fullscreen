@@ -1,4 +1,4 @@
-name: Compile Complete Microsoft AMCap Engine
+name: Compile KVM Video Engine
 
 on:
   push:
@@ -11,39 +11,21 @@ jobs:
     runs-on: windows-latest
 
     steps:
-    - name: Checkout Your Repository
+    - name: Checkout Source Code
       uses: actions/checkout@v4
-
-    - name: Partial Clone Microsoft Classic Samples Repo
-      run: |
-        git clone --depth 1 --filter=blob:none --sparse https://github.com/microsoft/Windows-classic-samples.git
-        cd Windows-classic-samples
-        git sparse-checkout set Samples/Win7Samples/multimedia/directshow/capture/amcap
-      shell: bash
-
-    - name: Run Python Custom Fullscreen Patch
-      run: |
-        copy patch_amcap.py Windows-classic-samples/
-        copy YourBranding.rc Windows-classic-samples/Samples/Win7Samples/multimedia/directshow/capture/amcap/
-        cd Windows-classic-samples
-        python patch_amcap.py
 
     - name: Setup MSVC Compiler Environment
       uses: ilammy/msvc-dev-cmd@v1
       with:
         arch: x64
 
-    - name: Compile Full Native Executable via MSBuild
+    - name: Compile AMCap via NMAKE Engine
       run: |
-        cd Windows-classic-samples/Samples/Win7Samples/multimedia/directshow/capture/amcap
-        # Append company version strings into their compilation resources
-        type YourBranding.rc >> amcap.rc
-        rc /r amcap.rc
-        cl /nologo /O2 /DUNICODE /D_UNICODE /D_AMD64_ /EHsc amcap.cpp amcap.res user32.lib gdi32.lib ole32.lib oleaut32.lib strmiids.lib uuid.lib /link /OUT:amcap.exe /SUBSYSTEM:WINDOWS
+        nmake /f Makefile.mak
       shell: cmd
 
     - name: Upload Finished Production Binary
       uses: actions/upload-artifact@v4
       with:
         name: complete-branded-amcap
-        path: Windows-classic-samples/Samples/Win7Samples/multimedia/directshow/capture/amcap/amcap.exe
+        path: amcap.exe
