@@ -86,7 +86,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
     g_hInstance = hInstance;
-    const char szClassName[] = "AMCAP_KVM_WINDOW";
+    // Added L prefix for Unicode compatibility
+    const wchar_t szClassName[] = L"AMCAP_KVM_WINDOW";
 
     WNDCLASSEX wc = {0};
     wc.cbSize        = sizeof(WNDCLASSEX);
@@ -101,7 +102,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     wc.lpszClassName = szClassName;
 
     if (!RegisterClassEx(&wc)) {
-        MessageBox(NULL, "Window Registration Failed!", "Error!", MB_ICONEXCLAMATION | MB_OK);
+        MessageBox(NULL, L"Window Registration Failed!", L"Error!", MB_ICONEXCLAMATION | MB_OK);
         return 0;
     }
 
@@ -109,15 +110,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         WS_EX_CLIENTEDGE,
         szClassName,
         
-        // 👇 CHANGE THE TITLE THAT SHOWS ON SCREEN HERE 👇
-        "Next Core System Pvt Ltd", 
+        // 👇 CHANGE THE TITLE THAT SHOWS ON SCREEN HERE (Keep the L before the quotes) 👇
+        L"Next Core System Pvt Ltd.", 
         
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, 800, 600,
         NULL, NULL, hInstance, NULL);
 
     if (g_hwndApp == NULL) {
-        MessageBox(NULL, "Window Creation Failed!", "Error!", MB_ICONEXCLAMATION | MB_OK);
+        MessageBox(NULL, L"Window Creation Failed!", L"Error!", MB_ICONEXCLAMATION | MB_OK);
         return 0;
     }
 
