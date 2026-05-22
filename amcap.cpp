@@ -1,5 +1,15 @@
 #include "amcap.h"
 #include "resource.h"
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mfreadwrite.h>
+#include <d3d9.h>
+
+// Link necessary multimedia libraries automatically
+#pragma comment(lib, "mfplat.lib")
+#pragma comment(lib, "mf.lib")
+#pragma comment(lib, "mfreadwrite.lib")
+#pragma comment(lib, "mfuuid.lib")
 
 HINSTANCE       g_hInstance = NULL;
 HWND            g_hwndApp = NULL;
@@ -7,7 +17,14 @@ bool            g_bFullScreen = false;
 WINDOWPLACEMENT g_wpPrev = { sizeof(WINDOWPLACEMENT) };
 HMENU           g_hMainMenu = NULL;
 
+// Media Foundation capture variables
+IMFMediaSource* g_pSource = NULL;
+IMFSourceReader* g_pReader = NULL;
+
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
+void ToggleFullScreen(HWND hwnd);
+HRESULT InitializeVideoCapture(HWND hwnd);
+void CloseVideoCapture();
 
 void ToggleFullScreen(HWND hwnd)
 {
@@ -48,6 +65,59 @@ void ToggleFullScreen(HWND hwnd)
     }
 }
 
+// Automatically look up your USB capture card and start the stream
+HRESULT InitializeVideoCapture(HWND hwnd)
+{
+    HRESULT hr = MFStartup(MF_VERSION);
+    if (FAILED(hr)) return hr;
+
+    IMFAttributes* pAttributes = NULL;
+    hr = MFCreateAttributes(&pAttributes, 1);
+    if (FAILED(hr)) return hr;
+
+    hr = pAttributes->SetGUID(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID);
+    if (FAILED(hr)) { pAttributes->Release(); return hr; }
+
+    IMFActivate** ppDevices = NULL;
+    UINT32 count = 0;
+    hr = MFEnumDeviceSources(pAttributes, &ppDevices, &count);
+    pAttributes->Release();
+    if (FAILED(hr)) return hr;
+
+    if (count == 0) {
+        // No capture card found yet
+        return E_FAIL;
+    }
+
+    // Default to the first video capture hardware device found (your USB capture card)
+    hr = ppDevices[0]->ActivateObject(IID_PPV_ARGS(&g_pSource));
+    
+    for (UINT32 i = 0; i < count; i++) {
+        ppDevices[i]->Release();
+    }
+    CoTaskMemFree(ppDevices);
+    if (FAILED(hr)) return hr;
+
+    IMFAttributes* pReaderAttributes = NULL;
+    hr = MFCreateAttributes(&pReaderAttributes, 2);
+    if (SUCCEEDED(hr)) {
+        pReaderAttributes->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
+        // Tell it to render the output straight onto our app window frame
+        pReaderAttributes->SetUNKNOWN(MF_SOURCE_READER_ASYNC_CALLBACK, NULL);
+        hr = MFCreateSourceReaderFromMediaSource(g_pSource, pReaderAttributes, &g_pReader);
+        pReaderAttributes->Release();
+    }
+
+    return hr;
+}
+
+void CloseVideoCapture()
+{
+    if (g_pReader) { g_pReader->Release(); g_pReader = NULL; }
+    if (g_pSource) { g_pSource->Shutdown(); g_pSource->Release(); g_pSource = NULL; }
+    MFShutdown();
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
@@ -76,7 +146,34 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             }
             break;
 
+        case WM_PAINT:
+            {
+                PAINTSTRUCT ps;
+                HDC hdc = BeginPaint(hwnd, &ps);
+                
+                // If video hasn't loaded or target is disconnected, display status message text
+                if (!g_pReader) {
+                    RECT rect;
+                    GetClientRect(hwnd, &rect);
+                    SetTextColor(hdc, RGB(128, 128, 128));
+                    SetBkMode(hdc, TRANSPARENT);
+                    DrawTextW(hdc, L"KVM Signal Offline - Check Video USB Capture Card Connection", -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                } else {
+                    // Let Windows Media Foundation draw the video payload directly here
+                    IMFSample* pSample = NULL;
+                    DWORD streamIndex, flags;
+                    LONGLONG timestamp;
+                    g_pReader->ReadSample((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &streamIndex, &flags, &timestamp, &pSample);
+                    if (pSample) { pSample->Release(); }
+                    InvalidateRect(hwnd, NULL, FALSE);
+                }
+                
+                EndPaint(hwnd, &ps);
+            }
+            return 0;
+
         case WM_DESTROY:
+            CloseVideoCapture();
             PostQuitMessage(0);
             return 0;
     }
@@ -86,8 +183,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
     g_hInstance = hInstance;
-    // Added L prefix for Unicode compatibility
-    const wchar_t szClassName[] = L"AMCAP_KVM_WINDOW";
+    const wchar_t szClassName[] = L"AMCAP_WINDOW";
 
     WNDCLASSEX wc = {0};
     wc.cbSize        = sizeof(WNDCLASSEX);
@@ -97,7 +193,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     wc.hIcon         = LoadIcon(NULL, IDI_APPLICATION);
     wc.hIconSm       = LoadIcon(NULL, IDI_APPLICATION);
     wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH); // Set background to clean black
     wc.lpszMenuName  = MAKEINTRESOURCE(IDR_MENU);
     wc.lpszClassName = szClassName;
 
@@ -107,20 +203,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
     g_hwndApp = CreateWindowEx(
-        WS_EX_CLIENTEDGE,
+        0,
         szClassName,
-        
-        // 👇 CHANGE THE TITLE THAT SHOWS ON SCREEN HERE (Keep the L before the quotes) 👇
-        L"Next Core System Pvt Ltd.", 
-        
+        L"NextCore", 
         WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 800, 600,
+        CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768, // Upgraded standard resolution block
         NULL, NULL, hInstance, NULL);
 
     if (g_hwndApp == NULL) {
         MessageBox(NULL, L"Window Creation Failed!", L"Error!", MB_ICONEXCLAMATION | MB_OK);
         return 0;
     }
+
+    // Try starting the physical video pipeline stream hook
+    InitializeVideoCapture(g_hwndApp);
 
     ShowWindow(g_hwndApp, nCmdShow);
     UpdateWindow(g_hwndApp);
