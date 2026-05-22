@@ -1,15 +1,12 @@
 #include "amcap.h"
 #include "resource.h"
-#include <mfapi.h>
-#include <mfidl.h>
-#include <mfreadwrite.h>
-#include <d3d9.h>
 
-// Link necessary multimedia libraries automatically
-#pragma comment(lib, "mfplat.lib")
-#pragma comment(lib, "mf.lib")
-#pragma comment(lib, "mfreadwrite.lib")
-#pragma comment(lib, "mfuuid.lib")
+// DirectShow core execution pointers
+IGraphBuilder* g_pGraph = NULL;
+ICaptureGraphBuilder2* g_pCapture = NULL;
+IVideoWindow* g_pVideoWindow = NULL;
+IMediaControl* g_pControl = NULL;
+IBaseFilter* g_pVCap = NULL;
 
 HINSTANCE       g_hInstance = NULL;
 HWND            g_hwndApp = NULL;
@@ -17,105 +14,148 @@ bool            g_bFullScreen = false;
 WINDOWPLACEMENT g_wpPrev = { sizeof(WINDOWPLACEMENT) };
 HMENU           g_hMainMenu = NULL;
 
-// Media Foundation capture variables
-IMFMediaSource* g_pSource = NULL;
-IMFSourceReader* g_pReader = NULL;
+// Device Discovery tracking
+IMoniker* g_rgpVideoMonikers[10] = {0};
+UINT            g_uVideoCount = 0;
+UINT            g_uActiveVideoIdx = 0;
 
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
-void ToggleFullScreen(HWND hwnd);
-HRESULT InitializeVideoCapture(HWND hwnd);
-void CloseVideoCapture();
+HRESULT InitDirectShow();
+void FreeDirectShow();
+HRESULT BuildCaptureGraph();
+void EnumerateDevices(HWND hwnd);
+void ChangeVideoDevice(UINT index);
+void ShowFilterProperties(HWND hwnd, IBaseFilter* pFilter);
 
 void ToggleFullScreen(HWND hwnd)
 {
     DWORD dwStyle = GetWindowLong(hwnd, GWL_STYLE);
-
     if (!g_bFullScreen) {
         GetWindowPlacement(hwnd, &g_wpPrev);
-        
         HMONITOR hMonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         MONITORINFO mi = { sizeof(MONITORINFO) };
         GetMonitorInfo(hMonitor, &mi);
-
         g_hMainMenu = GetMenu(hwnd);
         SetMenu(hwnd, NULL);
-
         SetWindowLong(hwnd, GWL_STYLE, dwStyle & ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX));
-
-        SetWindowPos(hwnd, HWND_TOP,
-                     mi.rcMonitor.left, mi.rcMonitor.top,
-                     mi.rcMonitor.right - mi.rcMonitor.left,
-                     mi.rcMonitor.bottom - mi.rcMonitor.top,
+        SetWindowPos(hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                     mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
                      SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
-
         g_bFullScreen = true;
-    } 
-    else {
+    } else {
         SetWindowLong(hwnd, GWL_STYLE, dwStyle | (WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX));
-        
-        if (g_hMainMenu != NULL) {
-            SetMenu(hwnd, g_hMainMenu);
-        }
-
+        if (g_hMainMenu) SetMenu(hwnd, g_hMainMenu);
         SetWindowPlacement(hwnd, &g_wpPrev);
-        SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
-
+        SetWindowPos(hwnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
         g_bFullScreen = false;
+    }
+    if (g_pVideoWindow) {
+        RECT rc; GetClientRect(hwnd, &rc);
+        g_pVideoWindow->SetWindowPosition(0, 0, rc.right, rc.bottom);
     }
 }
 
-// Automatically look up your USB capture card and start the stream
-HRESULT InitializeVideoCapture(HWND hwnd)
+HRESULT InitDirectShow()
 {
-    HRESULT hr = MFStartup(MF_VERSION);
+    HRESULT hr = CoCreateInstance(CLSID_FilterGraph, NULL, CLSCTX_INPROC_SERVER, IID_IGraphBuilder, (void**)&g_pGraph);
     if (FAILED(hr)) return hr;
-
-    IMFAttributes* pAttributes = NULL;
-    hr = MFCreateAttributes(&pAttributes, 1);
+    hr = CoCreateInstance(CLSID_CaptureGraphBuilder2, NULL, CLSCTX_INPROC_SERVER, IID_ICaptureGraphBuilder2, (void**)&g_pCapture);
     if (FAILED(hr)) return hr;
+    g_pCapture->SetFiltergraph(g_pGraph);
+    g_pGraph->QueryInterface(IID_IMediaControl, (void**)&g_pControl);
+    g_pGraph->QueryInterface(IID_IVideoWindow, (void**)&g_pVideoWindow);
+    return S_OK;
+}
 
-    hr = pAttributes->SetGUID(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID);
-    if (FAILED(hr)) { pAttributes->Release(); return hr; }
-
-    IMFActivate** ppDevices = NULL;
-    UINT32 count = 0;
-    hr = MFEnumDeviceSources(pAttributes, &ppDevices, &count);
-    pAttributes->Release();
-    if (FAILED(hr)) return hr;
-
-    if (count == 0) {
-        // No capture card found yet
-        return E_FAIL;
+void FreeDirectShow()
+{
+    if (g_pControl) g_pControl->Stop();
+    if (g_pVideoWindow) {
+        g_pVideoWindow->put_Visible(OAFALSE);
+        g_pVideoWindow->put_Owner(NULL);
     }
+    SAFE_RELEASE(g_pVideoWindow);
+    SAFE_RELEASE(g_pControl);
+    SAFE_RELEASE(g_pVCap);
+    SAFE_RELEASE(g_pCapture);
+    SAFE_RELEASE(g_pGraph);
+    for(UINT i=0; i<10; i++) {
+        SAFE_RELEASE(g_rgpVideoMonikers[i]);
+    }
+}
 
-    // Default to the first video capture hardware device found (your USB capture card)
-    hr = ppDevices[0]->ActivateObject(IID_PPV_ARGS(&g_pSource));
+void EnumerateDevices(HWND hwnd)
+{
+    ICreateDevEnum* pDevEnum = NULL;
+    IEnumMoniker* pEnum = NULL;
+    CoCreateInstance(CLSID_SystemDeviceEnum, NULL, CLSCTX_INPROC_SERVER, IID_ICreateDevEnum, (void**)&pDevEnum);
     
-    for (UINT32 i = 0; i < count; i++) {
-        ppDevices[i]->Release();
+    if (pDevEnum && pDevEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory, &pEnum, 0) == S_OK) {
+        HMENU hMenu = GetMenu(hwnd);
+        HMENU hDevMenu = GetSubMenu(hMenu, 1); // Devices Popup index
+        if (hDevMenu) {
+            DeleteMenu(hDevMenu, 0, MF_BYPOSITION);
+            g_uVideoCount = 0;
+            IMoniker* pMoniker = NULL;
+            while (pEnum->Next(1, &pMoniker, NULL) == S_OK && g_uVideoCount < 10) {
+                IPropertyBag* pPropBag = NULL;
+                pMoniker->BindToStorage(0, 0, IID_IPropertyBag, (void**)&pPropBag);
+                if (pPropBag) {
+                    VARIANT var; VariantInit(&var);
+                    pPropBag->Read(L"FriendlyName", &var, 0);
+                    AppendMenuW(hDevMenu, MF_STRING | MF_UNCHECKED, MENU_DEVICE_START + g_uVideoCount, var.bstrVal);
+                    VariantClear(&var);
+                    pPropBag->Release();
+                }
+                g_rgpVideoMonikers[g_uVideoCount] = pMoniker;
+                g_uVideoCount++;
+            }
+        }
+        pEnum->Release();
     }
-    CoTaskMemFree(ppDevices);
-    if (FAILED(hr)) return hr;
+    if (pDevEnum) pDevEnum->Release();
+}
 
-    IMFAttributes* pReaderAttributes = NULL;
-    hr = MFCreateAttributes(&pReaderAttributes, 2);
+void ChangeVideoDevice(UINT index)
+{
+    if (index >= g_uVideoCount) return;
+    if (g_pControl) g_pControl->Stop();
+    if (g_pVCap) { g_pGraph->RemoveFilter(g_pVCap); SAFE_RELEASE(g_pVCap); }
+    
+    HRESULT hr = g_rgpVideoMonikers[index]->BindToObject(0, 0, IID_IBaseFilter, (void**)&g_pVCap);
     if (SUCCEEDED(hr)) {
-        pReaderAttributes->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
-        // Tell it to render the output straight onto our app window frame
-        pReaderAttributes->SetUNKNOWN(MF_SOURCE_READER_ASYNC_CALLBACK, NULL);
-        hr = MFCreateSourceReaderFromMediaSource(g_pSource, pReaderAttributes, &g_pReader);
-        pReaderAttributes->Release();
+        g_pGraph->AddFilter(g_pVCap, L"Video Capture Source");
+        g_uActiveVideoIdx = index;
+        BuildCaptureGraph();
     }
+}
 
+HRESULT BuildCaptureGraph()
+{
+    if (!g_pVCap) return E_FAIL;
+    HRESULT hr = g_pCapture->RenderStream(&PIN_CATEGORY_PREVIEW, &MEDIATYPE_Video, g_pVCap, NULL, NULL);
+    if (g_pVideoWindow) {
+        g_pVideoWindow->put_Owner((OAHWND)g_hwndApp);
+        g_pVideoWindow->put_WindowStyle(WS_CHILD | WS_CLIPSIBLINGS);
+        RECT rc; GetClientRect(g_hwndApp, &rc);
+        g_pVideoWindow->SetWindowPosition(0, 0, rc.right, rc.bottom);
+        g_pVideoWindow->put_Visible(OATRUE);
+    }
+    if (g_pControl) g_pControl->Run();
     return hr;
 }
 
-void CloseVideoCapture()
+void ShowFilterProperties(HWND hwnd, IBaseFilter* pFilter)
 {
-    if (g_pReader) { g_pReader->Release(); g_pReader = NULL; }
-    if (g_pSource) { g_pSource->Shutdown(); g_pSource->Release(); g_pSource = NULL; }
-    MFShutdown();
+    if (!pFilter) return;
+    ISpecifyPropertyPages* pSpecify = NULL;
+    pFilter->QueryInterface(IID_ISpecifyPropertyPages, (void**)&pSpecify);
+    if (pSpecify) {
+        CAUUID caGUID; pSpecify->GetPages(&caGUID);
+        pSpecify->Release();
+        OleCreatePropertyFrame(hwnd, 0, 0, L"Device Properties", 1, (IUnknown**)&pFilter, caGUID.cElems, caGUID.pElems, 0, 0, NULL);
+        CoTaskMemFree(caGUID.pElems);
+    }
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -125,55 +165,54 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         case WM_LBUTTONDBLCLK:
             ToggleFullScreen(hwnd);
             return 0;
+            
+        case WM_SIZE:
+            if (g_pVideoWindow && !g_bFullScreen) {
+                g_pVideoWindow->SetWindowPosition(0, 0, LOWORD(lParam), HIWORD(lParam));
+            }
+            break;
 
         case WM_COMMAND:
-            switch (LOWORD(wParam))
             {
-                case ID_VIEW_FULLSCREEN:
-                    ToggleFullScreen(hwnd);
+                UINT id = LOWORD(wParam);
+                if (id >= MENU_DEVICE_START && id < MENU_DEVICE_START + 10) {
+                    ChangeVideoDevice(id - MENU_DEVICE_START);
                     return 0;
-
-                case ID_FILE_EXIT:
-                    DestroyWindow(hwnd);
-                    return 0;
+                }
+                switch (id)
+                {
+                    case ID_VIEW_FULLSCREEN:
+                        ToggleFullScreen(hwnd);
+                        return 0;
+                    case ID_OPTIONS_DEVICEPROP:
+                        ShowFilterProperties(hwnd, g_pVCap);
+                        return 0;
+                    case ID_OPTIONS_PINPROP:
+                        {
+                            IAMStreamConfig* pSC = NULL;
+                            g_pCapture->FindInterface(&PIN_CATEGORY_CAPTURE, &MEDIATYPE_Video, g_pVCap, IID_IAMStreamConfig, (void**)&pSC);
+                            if(pSC) {
+                                ShowFilterProperties(hwnd, (IBaseFilter*)pSC);
+                                pSC->Release();
+                            }
+                        }
+                        return 0;
+                    case ID_FILE_EXIT:
+                        DestroyWindow(hwnd);
+                        return 0;
+                }
             }
             break;
 
         case WM_KEYDOWN:
-            if (wParam == VK_ESCAPE && g_bFullScreen) {
+            if ((wParam == VK_ESCAPE || wParam == VK_RETURN) && g_bFullScreen) {
                 ToggleFullScreen(hwnd);
                 return 0;
             }
             break;
 
-        case WM_PAINT:
-            {
-                PAINTSTRUCT ps;
-                HDC hdc = BeginPaint(hwnd, &ps);
-                
-                // If video hasn't loaded or target is disconnected, display status message text
-                if (!g_pReader) {
-                    RECT rect;
-                    GetClientRect(hwnd, &rect);
-                    SetTextColor(hdc, RGB(128, 128, 128));
-                    SetBkMode(hdc, TRANSPARENT);
-                    DrawTextW(hdc, L"KVM Signal Offline - Check Video USB Capture Card Connection", -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                } else {
-                    // Let Windows Media Foundation draw the video payload directly here
-                    IMFSample* pSample = NULL;
-                    DWORD streamIndex, flags;
-                    LONGLONG timestamp;
-                    g_pReader->ReadSample((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &streamIndex, &flags, &timestamp, &pSample);
-                    if (pSample) { pSample->Release(); }
-                    InvalidateRect(hwnd, NULL, FALSE);
-                }
-                
-                EndPaint(hwnd, &ps);
-            }
-            return 0;
-
         case WM_DESTROY:
-            CloseVideoCapture();
+            FreeDirectShow();
             PostQuitMessage(0);
             return 0;
     }
@@ -183,48 +222,41 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
     g_hInstance = hInstance;
-    const wchar_t szClassName[] = L"AMCAP_WINDOW";
-
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    
+    const wchar_t szClassName[] = L"AMCAP";
     WNDCLASSEX wc = {0};
     wc.cbSize        = sizeof(WNDCLASSEX);
     wc.style         = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS; 
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = hInstance;
-    wc.hIcon         = LoadIcon(NULL, IDI_APPLICATION);
-    wc.hIconSm       = LoadIcon(NULL, IDI_APPLICATION);
     wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH); // Set background to clean black
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
     wc.lpszMenuName  = MAKEINTRESOURCE(IDR_MENU);
     wc.lpszClassName = szClassName;
 
-    if (!RegisterClassEx(&wc)) {
-        MessageBox(NULL, L"Window Registration Failed!", L"Error!", MB_ICONEXCLAMATION | MB_OK);
-        return 0;
-    }
+    RegisterClassEx(&wc);
 
-    g_hwndApp = CreateWindowEx(
-        0,
-        szClassName,
-        L"NextCore", 
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768, // Upgraded standard resolution block
-        NULL, NULL, hInstance, NULL);
-
-    if (g_hwndApp == NULL) {
-        MessageBox(NULL, L"Window Creation Failed!", L"Error!", MB_ICONEXCLAMATION | MB_OK);
-        return 0;
-    }
-
-    // Try starting the physical video pipeline stream hook
-    InitializeVideoCapture(g_hwndApp);
+    g_hwndApp = CreateWindowEx(0, szClassName, L"Professional Hardware KVM Console", 
+                               WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768, 
+                               NULL, NULL, hInstance, NULL);
 
     ShowWindow(g_hwndApp, nCmdShow);
     UpdateWindow(g_hwndApp);
+    
+    if (SUCCEEDED(InitDirectShow())) {
+        EnumerateDevices(g_hwndApp);
+        if (g_uVideoCount > 0) {
+            ChangeVideoDevice(0); 
+        }
+    }
 
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0) > 0) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
+    
+    CoUninitialize();
     return (int)msg.wParam;
 }
