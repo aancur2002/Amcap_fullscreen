@@ -1,0 +1,30 @@
+name: Compile KVM Video Engine
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout Source Code
+      uses: actions/checkout@v4
+
+    - name: Setup MSVC Compiler Environment
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
+
+    - name: Compile AMCap via NMAKE Engine
+      run: |
+        nmake /f Makefile.mak
+
+    - name: Upload Finished Production Binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: amcap-production-exe
+        path: amcap.exe
